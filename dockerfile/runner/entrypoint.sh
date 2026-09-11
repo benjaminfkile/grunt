@@ -33,4 +33,15 @@ if [ "${GRUNT_SECRETS_FROM_STDIN:-0}" = "1" ]; then
   unset GRUNT_SECRETS_FROM_STDIN
 fi
 
+# Start the image's throwaway Postgres cluster (initialized at build time at
+# $GRUNT_PGDATA) so a task has a database before its first turn. Runs as the
+# unprivileged runtime user, listens on 127.0.0.1:5432 and the /tmp socket,
+# and dies with the container. A failure to start is reported and never
+# blocks the task; set GRUNT_RUNNER_POSTGRES=0 to skip it.
+if [ "${GRUNT_RUNNER_POSTGRES:-1}" = "1" ] && [ -n "${GRUNT_PGDATA:-}" ] && [ -d "$GRUNT_PGDATA" ]; then
+  if ! pg_ctl -D "$GRUNT_PGDATA" -l /tmp/grunt-postgres.log -w -t 30 start >/dev/null 2>&1; then
+    echo "grunt-entrypoint: postgres did not start; see /tmp/grunt-postgres.log" >&2
+  fi
+fi
+
 exec "$@"

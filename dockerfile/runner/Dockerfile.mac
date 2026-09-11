@@ -80,13 +80,15 @@ ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 
 # Install the PostgreSQL server + client so task agents can verify database
-# work (knex migrations, service tests) against a real Postgres. The server is
-# NOT started by the image: a task that needs it initializes a throwaway
-# cluster as the unprivileged runtime user, e.g.
-#   initdb -D /tmp/pg && pg_ctl -D /tmp/pg -o "-k /tmp" start \
-#     && createdb -h /tmp app_test
-# The versioned server binaries (initdb, pg_ctl, postgres) live outside the
-# default PATH, so expose them explicitly.
+# work (knex migrations, service tests) against a real Postgres. A throwaway
+# cluster is initialized at build time (below, as the runtime user) and
+# started by the entrypoint on every container start, so a task has a
+# database on 127.0.0.1:5432 (and the /tmp unix socket) before its first turn,
+# reachable through the standard libpq variables (PGHOST, PGPORT, PGUSER,
+# PGPASSWORD, PGDATABASE) and DATABASE_URL. Trust auth on both local and host
+# connections; the cluster lives and dies with the container. The versioned
+# server binaries (initdb, pg_ctl, postgres) live outside the default PATH,
+# so expose them explicitly.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends postgresql postgresql-client \
  && rm -rf /var/lib/apt/lists/*
@@ -110,6 +112,32 @@ RUN chmod 0755 /usr/local/bin/grunt-entrypoint.sh
 ENV HOME=/home/node
 USER node
 WORKDIR /workspace
+
+# Initialize the throwaway Postgres cluster now (initdb refuses to run as
+# root, hence after USER node) so the entrypoint only has to start it. The
+# data directory is part of the image; each container gets its own writable
+# copy. Superuser `postgres` with trust auth; a task that wants a database
+# runs `createdb <name>` or connects to the default `postgres` database.
+ENV GRUNT_PGDATA=/home/node/pgdata
+RUN initdb -D "$GRUNT_PGDATA" -U postgres -E UTF8 --locale=C.UTF-8 \
+        --auth-local=trust --auth-host=trust --no-instructions \
+ && printf '%s\n' \
+        "listen_addresses = '127.0.0.1'" \
+        "port = 5432" \
+        "unix_socket_directories = '/tmp'" \
+        "shared_buffers = 64MB" \
+        "max_connections = 50" \
+        "fsync = off" \
+        "synchronous_commit = off" \
+        "full_page_writes = off" \
+        "logging_collector = off" \
+    >> "$GRUNT_PGDATA/postgresql.conf"
+ENV PGHOST=127.0.0.1 \
+    PGPORT=5432 \
+    PGUSER=postgres \
+    PGPASSWORD=postgres \
+    PGDATABASE=postgres \
+    DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres
 
 ENTRYPOINT ["/usr/local/bin/grunt-entrypoint.sh"]
 # Default command doubles as a smoke test: `docker run grunt/runner` prints
